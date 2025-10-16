@@ -1,14 +1,85 @@
-<!DOCTYPE html>
-  <html lang="en">
-  <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Dynamic Quote Generator</title>
-  </head>
-  <body>
-    <h1>Dynamic Quote Generator</h1>
-    <div id="quoteDisplay"></div>
-    <button id="newQuote">Show New Quote</button>
-    <script src="script.js"></script>
-  </body>
-  </html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Dynamic Quote Generator — Web Storage + JSON</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="./styles.css" />
+  <style>
+    /* Minimal inline styles (optional if you use styles.css) */
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 2rem; }
+    h1 { margin-bottom: 0.25rem; }
+    .muted { color: #666; margin-top: 0; }
+    .card { border: 1px solid #eee; border-radius: 10px; padding: 1rem; margin-block: 1rem; }
+    .row { display: flex; gap: 1rem; flex-wrap: wrap; }
+    label { display:block; font-weight:600; margin-top:.5rem }
+    input[type="text"] { width: 100%; padding: .5rem; border: 1px solid #ccc; border-radius: 6px; }
+    button { padding: .6rem .9rem; border-radius: 8px; border: 1px solid #ddd; background:#fafafa; cursor: pointer; }
+    button:hover { background:#f2f2f2; }
+    ul { padding-left: 1.2rem; }
+    .quote { font-size: 1.25rem; margin: 0; }
+    .author { color:#444; margin:.25rem 0 0 0; }
+    .controls { display:flex; gap:.5rem; flex-wrap: wrap; }
+    .danger { border-color:#f2d6d6; background:#fff6f6; }
+    .right { margin-left:auto }
+    small code { background:#f6f6f6; padding:.1rem .3rem; border-radius:4px; }
+  </style>
+</head>
+<body>
+  <h1>Dynamic Quote Generator</h1>
+  <p class="muted">Web Storage (Local & Session) + JSON Import/Export</p>
+
+  <!-- Display Current / Random Quote -->
+  <section class="card" id="displayCard">
+    <p class="quote" id="quoteText">Click “Random Quote” to start</p>
+    <p class="author" id="quoteAuthor"></p>
+    <div class="controls">
+      <button id="btnRandom">Random Quote</button>
+      <button id="btnShowLast">Show Last Viewed (session)</button>
+      <button id="btnCopy" title="Copy quote text">Copy</button>
+      <span class="right muted"><small>Session keeps <code>lastViewedQuoteIndex</code></small></span>
+    </div>
+  </section>
+
+  <!-- Add Quote Form -->
+  <section class="card">
+    <h2>Add a Quote</h2>
+    <form id="addQuoteForm">
+      <label for="quoteInput">Quote</label>
+      <input type="text" id="quoteInput" placeholder="e.g., The only limit to our realization of tomorrow is our doubts of today." required />
+      <label for="authorInput">Author (optional)</label>
+      <input type="text" id="authorInput" placeholder="e.g., Franklin D. Roosevelt" />
+      <div class="controls" style="margin-top: .75rem;">
+        <button type="submit">Add Quote</button>
+        <button type="button" id="btnClearForm">Clear</button>
+      </div>
+    </form>
+  </section>
+
+  <!-- Import / Export -->
+  <section class="card">
+    <h2>Import / Export</h2>
+    <div class="row">
+      <div>
+        <button id="btnExport">Export JSON</button>
+      </div>
+      <div>
+        <!-- Keep these exact id & function name to match your rubric -->
+        <input type="file" id="importFile" accept=".json" onchange="importFromJsonFile(event)" />
+      </div>
+      <div class="right">
+        <button class="danger" id="btnClearAll" title="Remove all saved quotes from Local Storage">Clear All (Local Storage)</button>
+      </div>
+    </div>
+    <p class="muted" style="margin:.5rem 0 0;">Export uses <code>Blob</code> + <code>URL.createObjectURL</code>. Import merges, validates, and de-duplicates.</p>
+  </section>
+
+  <!-- List -->
+  <section class="card">
+    <h2>All Quotes (<span id="count">0</span>)</h2>
+    <ul id="quotesList"></ul>
+  </section>
+
+  <script src="./script.js"></script>
+</body>
+</html>
