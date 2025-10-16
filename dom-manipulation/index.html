@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Dynamic Quote Generator — Web Storage + JSON + Categories</title>
+  <title>Dynamic Quote Generator — Web Storage + JSON + Categories + Sync</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 2rem; }
@@ -11,7 +11,7 @@
     .card { border: 1px solid #eee; border-radius: 10px; padding: 1rem; margin-block: 1rem; }
     .row { display: flex; gap: 1rem; flex-wrap: wrap; align-items: center; }
     label { display:block; font-weight:600; margin-top:.5rem }
-    input[type="text"], select { width: 100%; padding: .5rem; border: 1px solid #ccc; border-radius: 6px; }
+    input[type="text"], select, input[type="file"] { width: 100%; padding: .5rem; border: 1px solid #ccc; border-radius: 6px; }
     button { padding: .6rem .9rem; border-radius: 8px; border: 1px solid #ddd; background:#fafafa; cursor: pointer; }
     button:hover { background:#f2f2f2; }
     ul { padding-left: 1.2rem; }
@@ -20,19 +20,18 @@
     .controls { display:flex; gap:.5rem; flex-wrap: wrap; }
     .danger { border-color:#f2d6d6; background:#fff6f6; }
     .right { margin-left:auto }
-    small code { background:#f6f6f6; padding:.1rem .3rem; border-radius:4px; }
     .pill { display:inline-block; font-size:.8rem; padding:.15rem .5rem; border:1px solid #ddd; border-radius:999px; margin-left:.4rem; }
+    small code { background:#f6f6f6; padding:.1rem .3rem; border-radius:4px; }
   </style>
 </head>
 <body>
   <h1>Dynamic Quote Generator</h1>
-  <p class="muted">Web Storage (Local & Session) + JSON Import/Export + Category Filter</p>
+  <p class="muted">Web Storage (Local & Session) + JSON Import/Export + Category Filter + Server Sync</p>
 
   <!-- Filter: Category -->
   <section class="card">
     <h2>Filter Quotes</h2>
     <label for="categoryFilter">Category</label>
-    <!-- EXACT ID and onchange function name per checker -->
     <select id="categoryFilter" onchange="filterQuotes()">
       <option value="all">All Categories</option>
       <!-- Dynamically populated categories -->
@@ -94,6 +93,22 @@
       Export uses <code>Blob</code> + <code>URL.createObjectURL</code>. Import merges, validates, and de-duplicates.
     </p>
   </section>
+
+  <section class="card">
+    <h2>Server Sync</h2>
+    <div class="row">
+      <div id="syncStatus" class="muted">Last sync: never</div>
+      <button id="btnSync">Sync Now</button>
+      <button id="btnResolveAll" title="Apply 'server wins' for all conflicts">Resolve All (Server Wins)</button>
+      <span class="right muted"><small>Auto-sync runs periodically</small></span>
+    </div>
+    <details style="margin-top:.6rem;">
+      <summary><strong>Conflicts</strong> (server vs local)</summary>
+      <ul id="conflictLog" style="margin-top:.5rem;"></ul>
+    </details>
+   
+  </section>
+
 
   <!-- List -->
   <section class="card">
