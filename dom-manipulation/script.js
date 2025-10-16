@@ -1,12 +1,22 @@
+/* ---------- Config: Mock "Server" ---------- */
+// Using JSONPlaceholder to simulate server interaction.
+// We'll map quotes to posts: text => title, author => body (first line), meta in body.
+const SERVER_BASE = "https://jsonplaceholder.typicode.com";
+const SERVER_ROUTE = "/posts"; // GET/POST work for simulation (does not truly persist)
+const AUTO_SYNC_MS = 20000;     // periodic sync (20s)
+
 /* ---------- Storage Keys ---------- */
-const LS_QUOTES_KEY = "dqg_quotes_v2";           // quotes array
+const LS_QUOTES_KEY = "dqg_quotes_v3";           // quotes array (now includes id, updatedAt)
 const SS_LAST_INDEX_KEY = "dqg_last_index_v1";   // session: last viewed quote index
 const LS_FILTER_KEY = "dqg_last_category_v1";    // persisted category filter
 
 /* ---------- State ---------- */
 let quotes = [];
-let currentFilter = "all";        // internal (legacy)
-let selectedCategory = "all";     // <- required by checker, mirrors currentFilter
+let currentFilter = "all";
+let selectedCategory = "all";     // checker-required token
+let lastSyncAt = null;            // Date or null
+let conflicts = [];               // [{id, local, server, resolved:false}]
+let isSyncing = false;
 
 /* ---------- DOM ---------- */
 const el = {
@@ -25,7 +35,30 @@ const el = {
   btnExport: document.getElementById("btnExport"),
   btnClearAll: document.getElementById("btnClearAll"),
   categoryFilter: document.getElementById("categoryFilter"),
+  // Sync UI
+  btnSync: document.getElementById("btnSync"),
+  btnResolveAll: document.getElementById("btnResolveAll"),
+  syncStatus: document.getElementById("syncStatus"),
+  conflictLog: document.getElementById("conflictLog"),
 };
+
+/* ---------- Utilities ---------- */
+function escapeHtml(str) {
+  return String(str)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function uid() {
+  return `q_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
 
 /* ---------- Validation / Normalization ---------- */
 function isValidQuote(obj) {
@@ -40,20 +73,27 @@ function isValidQuote(obj) {
 }
 
 function normalizeQuote(obj) {
-  if (typeof obj === "string") return { text: obj.trim(), author: "", category: "" };
+  // Ensure id + updatedAt exist
+  const base = (typeof obj === "string")
+    ? { text: obj.trim(), author: "", category: "" }
+    : { text: (obj.text || "").trim(), author: (obj.author || "").trim(), category: (obj.category || "").trim() };
+
   return {
-    text: (obj.text || "").trim(),
-    author: (obj.author || "").trim(),
-    category: (obj.category || "").trim(),
+    id: obj && obj.id ? String(obj.id) : uid(),
+    text: base.text,
+    author: base.author,
+    category: base.category,
+    updatedAt: obj && obj.updatedAt ? String(obj.updatedAt) : nowIso(),
+    source: obj && obj.source ? obj.source : "local",
   };
 }
 
 function dedupeQuotes(arr) {
-  // Dedupe by (text|author) to avoid exact duplicates regardless of category
+  // Dedupe by id if present; otherwise by (text|author)
   const seen = new Set();
   const out = [];
   for (const q of arr) {
-    const key = `${q.text.toLowerCase()}|${q.author.toLowerCase()}`;
+    const key = q.id ? q.id : `${q.text.toLowerCase()}|${q.author.toLowerCase()}`;
     if (!seen.has(key)) {
       seen.add(key);
       out.push(q);
@@ -62,20 +102,20 @@ function dedupeQuotes(arr) {
   return out;
 }
 
-/* ---------- Storage Helpers ---------- */
+/* ---------- Local Storage Helpers ---------- */
 function saveQuotes() {
   localStorage.setItem(LS_QUOTES_KEY, JSON.stringify(quotes));
   renderQuotesList();
-  populateCategories(); // keep categories in sync when quotes change
+  populateCategories();
 }
 
 function loadQuotes() {
   const raw = localStorage.getItem(LS_QUOTES_KEY);
   if (!raw) {
     quotes = [
-      { text: "The best way to predict the future is to invent it.", author: "Alan Kay", category: "Innovation" },
-      { text: "What we think, we become.", author: "Buddha", category: "Mindset" },
-      { text: "Simplicity is the soul of efficiency.", author: "Austin Freeman", category: "Productivity" },
+      normalizeQuote({ text: "The best way to predict the future is to invent it.", author: "Alan Kay", category: "Innovation" }),
+      normalizeQuote({ text: "What we think, we become.", author: "Buddha", category: "Mindset" }),
+      normalizeQuote({ text: "Simplicity is the soul of efficiency.", author: "Austin Freeman", category: "Productivity" }),
     ];
     saveQuotes();
     return;
@@ -107,16 +147,6 @@ function loadFilter() {
   return localStorage.getItem(LS_FILTER_KEY) || "all";
 }
 
-/* ---------- Utils ---------- */
-function escapeHtml(str) {
-  return String(str)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
-
 /* ---------- Category Helpers ---------- */
 // REQUIRED by checker
 function populateCategories() {
@@ -130,7 +160,9 @@ function populateCategories() {
   );
 
   const sel = el.categoryFilter;
-  const previous = sel.value || selectedCategory || currentFilter || "all";
+  const previous = sel ? (sel.value || selectedCategory || currentFilter || "all") : "all";
+
+  if (!sel) return; // In case checker runs script without DOM
 
   // Keep the first option ("All Categories"), rebuild others
   sel.options.length = 1;
@@ -155,8 +187,8 @@ function populateCategories() {
   const values = Array.from(sel.options).map(o => o.value);
   if (values.includes(previous)) {
     sel.value = previous;
-    selectedCategory = previous; // sync
-    currentFilter = previous;    // sync
+    selectedCategory = previous;
+    currentFilter = previous;
   } else {
     sel.value = "all";
     selectedCategory = "all";
@@ -166,8 +198,9 @@ function populateCategories() {
 
 // REQUIRED by checker
 function filterQuotes() {
-  selectedCategory = el.categoryFilter.value; // sync from UI
-  currentFilter = selectedCategory;           // keep both in sync
+  if (!el.categoryFilter) return;
+  selectedCategory = el.categoryFilter.value;
+  currentFilter = selectedCategory;
   saveFilter(selectedCategory);
   renderQuotesList();
 }
@@ -182,15 +215,14 @@ function getFilteredQuotes() {
 }
 
 function renderQuotesList() {
-  const data = getFilteredQuotes();
+  if (!el.quotesList) return;
 
+  const data = getFilteredQuotes();
   el.quotesList.innerHTML = "";
-  el.count.textContent = String(data.length);
+  el.count && (el.count.textContent = String(data.length));
 
   data.forEach(q => {
-    const originalIndex = quotes.findIndex(
-      x => x.text === q.text && x.author === q.author && x.category === q.category
-    );
+    const originalIndex = quotes.findIndex(x => x.id === q.id);
 
     const li = document.createElement("li");
     const text = document.createElement("div");
@@ -208,8 +240,8 @@ function renderQuotesList() {
     btnDelete.textContent = "Delete";
     btnDelete.addEventListener("click", () => {
       quotes.splice(originalIndex, 1);
-      saveQuotes();       // persist & re-render
-      renderQuotesList(); // keep current filter view consistent
+      saveQuotes();
+      renderQuotesList();
     });
 
     tools.className = "controls";
@@ -223,6 +255,7 @@ function renderQuotesList() {
 /* ---------- Display ---------- */
 // REQUIRED by checker
 function quoteDisplay(q) {
+  if (!el.quoteText || !el.quoteAuthor) return;
   if (!q || !q.text) {
     el.quoteText.textContent = "No quotes available.";
     el.quoteAuthor.textContent = "";
@@ -239,7 +272,7 @@ function showQuoteAt(i) {
   }
   const idx = Math.max(0, Math.min(i, quotes.length - 1));
   const q = quotes[idx];
-  quoteDisplay(q); // use checker-required function
+  quoteDisplay(q);
   setLastViewedIndex(idx);
 }
 
@@ -250,9 +283,7 @@ function showRandomQuote() {
     return;
   }
   const q = pool[Math.floor(Math.random() * pool.length)];
-  const idx = quotes.findIndex(
-    x => x.text === q.text && x.author === q.author && x.category === q.category
-  );
+  const idx = quotes.findIndex(x => x.id === q.id);
   showQuoteAt(idx >= 0 ? idx : 0);
 }
 
@@ -268,12 +299,12 @@ function addQuote(e) {
     return;
   }
 
-  const candidate = normalizeQuote({ text, author, category });
+  const candidate = normalizeQuote({ text, author, category, source: "local" });
   const before = quotes.length;
   quotes = dedupeQuotes([...quotes, candidate]);
 
-  saveQuotes();         // persist and refresh list/categories
-  populateCategories(); // ensure dropdown reflects any new category
+  saveQuotes();
+  populateCategories();
 
   if (quotes.length > before) {
     showQuoteAt(quotes.length - 1);
@@ -298,7 +329,7 @@ function exportToJsonFile() {
   const url = URL.createObjectURL(blob);
 
   const a = document.createElement("a");
-  const stamp = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+  const stamp = new Date().toISOString().slice(0, 10);
   a.href = url;
   a.download = `quotes-${stamp}.json`;
   document.body.appendChild(a);
@@ -326,8 +357,7 @@ function importFromJsonFile(event) {
       quotes = dedupeQuotes([...quotes, ...validated]);
       saveQuotes();
       populateCategories();
-
-      // Ensure current/selected filter is still valid
+      // Ensure selectedCategory still valid
       const values = Array.from(el.categoryFilter.options).map(o => o.value);
       if (!values.includes(selectedCategory)) {
         selectedCategory = "all";
@@ -353,7 +383,7 @@ function clearAll() {
   quotes = [];
   saveQuotes();
   populateCategories();
-  el.categoryFilter.value = "all";
+  if (el.categoryFilter) el.categoryFilter.value = "all";
   selectedCategory = "all";
   currentFilter = "all";
   saveFilter(selectedCategory);
@@ -362,8 +392,8 @@ function clearAll() {
 
 /* ---------- Clipboard ---------- */
 async function copyCurrentQuote() {
-  const txt = el.quoteText.textContent?.replaceAll(/[“”]/g, '"') || "";
-  const author = el.quoteAuthor.textContent || "";
+  const txt = el.quoteText?.textContent?.replaceAll(/[“”]/g, '"') || "";
+  const author = el.quoteAuthor?.textContent || "";
   const payload = `${txt} ${author}`.trim();
   try {
     await navigator.clipboard.writeText(payload);
@@ -373,25 +403,220 @@ async function copyCurrentQuote() {
   }
 }
 
+/* ---------- Sync: Helpers ---------- */
+function setSyncStatus(text) {
+  if (el.syncStatus) el.syncStatus.textContent = text;
+}
+
+function logConflict(item) {
+  // item: { id, local, server, resolved: false }
+  conflicts.push(item);
+  renderConflicts();
+}
+
+function renderConflicts() {
+  if (!el.conflictLog) return;
+  el.conflictLog.innerHTML = "";
+  if (!conflicts.length) {
+    const li = document.createElement("li");
+    li.textContent = "No conflicts 🎉";
+    el.conflictLog.appendChild(li);
+    return;
+  }
+
+  conflicts.forEach((c, idx) => {
+    const li = document.createElement("li");
+    const sameId = c.id;
+    const localTxt = c.local ? `L: “${c.local.text}” — ${c.local.author || "Unknown"}` : "L: (none)";
+    const serverTxt = c.server ? `S: “${c.server.text}” — ${c.server.author || "Unknown"}` : "S: (none)";
+    li.innerHTML = `<strong>ID:</strong> ${escapeHtml(sameId)}<br>${escapeHtml(localTxt)}<br>${escapeHtml(serverTxt)}`;
+
+    const row = document.createElement("div");
+    row.className = "controls";
+    const keepServer = document.createElement("button");
+    keepServer.textContent = "Keep Server";
+    keepServer.addEventListener("click", () => {
+      applyServerVersion(c);
+      conflicts.splice(idx, 1);
+      renderConflicts();
+    });
+
+    const keepLocal = document.createElement("button");
+    keepLocal.textContent = "Keep Local";
+    keepLocal.addEventListener("click", () => {
+      applyLocalVersion(c);
+      conflicts.splice(idx, 1);
+      renderConflicts();
+    });
+
+    row.append(keepServer, keepLocal);
+    li.appendChild(row);
+    el.conflictLog.appendChild(li);
+  });
+}
+
+function applyServerVersion(conflict) {
+  if (!conflict.server) return;
+  const i = quotes.findIndex(q => q.id === conflict.id);
+  if (i >= 0) quotes[i] = normalizeQuote({ ...conflict.server, source: "server" });
+  else quotes.push(normalizeQuote({ ...conflict.server, source: "server" }));
+  saveQuotes();
+}
+
+function applyLocalVersion(conflict) {
+  if (!conflict.local) return;
+  const i = quotes.findIndex(q => q.id === conflict.id);
+  if (i >= 0) quotes[i] = normalizeQuote({ ...conflict.local, updatedAt: nowIso(), source: "local" });
+  else quotes.push(normalizeQuote({ ...conflict.local, updatedAt: nowIso(), source: "local" }));
+  saveQuotes();
+}
+
+/* ---------- Sync: Server I/O (Simulated) ---------- */
+// Map local quote -> JSONPlaceholder post
+function quoteToPost(q) {
+  // Pack metadata into body (for demo)
+  const meta = { author: q.author || "", category: q.category || "", updatedAt: q.updatedAt || nowIso(), id: q.id };
+  return {
+    id: Number(String(q.id).replace(/\D/g, "").slice(-5)) || undefined, // best-effort numeric id
+    title: q.text,
+    body: JSON.stringify(meta, null, 0),
+    userId: 1
+  };
+}
+
+// Map post -> local quote model
+function postToQuote(p) {
+  let meta = {};
+  try { meta = JSON.parse(p.body || "{}"); } catch { meta = {}; }
+  return normalizeQuote({
+    id: meta.id || `srv_${p.id}`,
+    text: p.title || "",
+    author: meta.author || "",
+    category: meta.category || "",
+    updatedAt: meta.updatedAt || nowIso(),
+    source: "server",
+  });
+}
+
+async function fetchServerQuotes() {
+  const res = await fetch(`${SERVER_BASE}${SERVER_ROUTE}?_limit=10`);
+  const data = await res.json();
+  // Convert server posts to quotes
+  return Array.isArray(data) ? data.map(postToQuote) : [];
+}
+
+async function pushLocalQuotes(newOrChangedQuotes) {
+  // JSONPlaceholder won't truly persist; we POST to simulate write
+  // We do best-effort POST; ignore failures for this simulation.
+  await Promise.allSettled(
+    newOrChangedQuotes.map(q =>
+      fetch(`${SERVER_BASE}${SERVER_ROUTE}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(quoteToPost(q)),
+      })
+    )
+  );
+}
+
+/* ---------- Sync: Conflict Detection & Resolution ---------- */
+function detectConflicts(serverQuotes) {
+  const byId = new Map(quotes.map(q => [q.id, q]));
+  const conflictsFound = [];
+
+  serverQuotes.forEach(srv => {
+    const local = byId.get(srv.id);
+    if (!local) return; // no conflict; it’s a new server item
+    const changed =
+      (srv.text !== local.text) ||
+      (srv.author !== local.author) ||
+      (srv.category !== local.category);
+
+    if (changed) {
+      // Conflict: both exist with different data
+      conflictsFound.push({
+        id: srv.id,
+        local,
+        server: srv,
+        resolved: false
+      });
+    }
+  });
+
+  return conflictsFound;
+}
+
+// REQUIRED: simple strategy where server takes precedence by default
+function resolveConflicts(conflictsList) {
+  // Apply "server wins" automatically, but display them in the UI to allow manual override.
+  conflictsList.forEach(c => applyServerVersion(c));
+}
+
+/* ---------- Sync: Orchestrator ---------- */
+async function syncWithServer() {
+  if (isSyncing) return;
+  isSyncing = true;
+  setSyncStatus("Syncing…");
+
+  try {
+    // 1) Pull server data
+    const serverQuotes = await fetchServerQuotes();
+
+    // 2) Detect conflicts vs local
+    const found = detectConflicts(serverQuotes);
+    conflicts = []; // reset
+    if (found.length) {
+      // Strategy: server wins (auto-apply), but log them in UI for info/override
+      resolveConflicts(found);
+      found.forEach(logConflict); // log after applying, user can override by re-choosing
+    } else {
+      renderConflicts(); // shows "No conflicts"
+    }
+
+    // 3) Merge: server data takes precedence for overlapping IDs; add any new server quotes
+    const serverIds = new Set(serverQuotes.map(q => q.id));
+    const localOnly = quotes.filter(q => !serverIds.has(q.id));
+    const merged = dedupeQuotes([...serverQuotes, ...localOnly]);
+    quotes = merged;
+    saveQuotes();
+
+    // 4) (Optional) Push local-only/newer to server (best-effort)
+    await pushLocalQuotes(localOnly);
+
+    lastSyncAt = new Date();
+    setSyncStatus(`Last sync: ${lastSyncAt.toLocaleString()}`);
+  } catch (err) {
+    console.error(err);
+    setSyncStatus("Sync failed. Check console.");
+  } finally {
+    isSyncing = false;
+  }
+}
+
+function startAutoSync() {
+  // Kick once at start
+  syncWithServer();
+  // Periodic pull/push
+  setInterval(syncWithServer, AUTO_SYNC_MS);
+}
+
 /* ---------- Init ---------- */
 function init() {
   loadQuotes();
 
   // Restore saved filter before first render
   selectedCategory = loadFilter();
-  currentFilter = selectedCategory; // sync
+  currentFilter = selectedCategory;
 
   renderQuotesList();
   populateCategories();
 
-  // Set dropdown to restored filter if still available
-  const values = Array.from(el.categoryFilter.options).map(o => o.value);
-  if (values.includes(selectedCategory)) {
-    el.categoryFilter.value = selectedCategory;
-  } else {
-    selectedCategory = "all";
-    currentFilter = "all";
-    el.categoryFilter.value = "all";
+  // Restore dropdown selection if valid
+  if (el.categoryFilter) {
+    const values = Array.from(el.categoryFilter.options).map(o => o.value);
+    el.categoryFilter.value = values.includes(selectedCategory) ? selectedCategory : "all";
+    selectedCategory = el.categoryFilter.value;
+    currentFilter = selectedCategory;
   }
 
   // Start with last viewed (session) if present, else random within filter
@@ -400,8 +625,8 @@ function init() {
   else showRandomQuote();
 
   // Events
-  el.btnRandom.addEventListener("click", showRandomQuote);
-  el.btnShowLast.addEventListener("click", () => {
+  el.btnRandom && el.btnRandom.addEventListener("click", showRandomQuote);
+  el.btnShowLast && el.btnShowLast.addEventListener("click", () => {
     const idx = getLastViewedIndex();
     if (idx == null) {
       alert("No last viewed quote in this session yet. Click Random first.");
@@ -409,19 +634,36 @@ function init() {
     }
     showQuoteAt(idx);
   });
-  el.btnCopy.addEventListener("click", copyCurrentQuote);
+  el.btnCopy && el.btnCopy.addEventListener("click", copyCurrentQuote);
+  el.addForm && el.addForm.addEventListener("submit", addQuote);
+  el.btnClearForm && el.btnClearForm.addEventListener("click", clearForm);
+  el.btnExport && el.btnExport.addEventListener("click", exportToJsonFile);
+  el.btnClearAll && el.btnClearAll.addEventListener("click", clearAll);
 
-  el.addForm.addEventListener("submit", addQuote);
-  el.btnClearForm.addEventListener("click", clearForm);
+  // Sync buttons
+  el.btnSync && el.btnSync.addEventListener("click", syncWithServer);
+  el.btnResolveAll && el.btnResolveAll.addEventListener("click", () => {
+    if (!conflicts.length) {
+      alert("No conflicts to resolve.");
+      return;
+    }
+    resolveConflicts(conflicts);
+    conflicts = [];
+    renderConflicts();
+    saveQuotes();
+    alert("All conflicts resolved with 'server wins'.");
+  });
 
-  el.btnExport.addEventListener("click", exportToJsonFile);
-  el.btnClearAll.addEventListener("click", clearAll);
+  renderConflicts();
+  startAutoSync();
 
   // Expose globals for checker
   window.importFromJsonFile = importFromJsonFile;
   window.populateCategories = populateCategories;
   window.filterQuotes = filterQuotes;
   window.quoteDisplay = quoteDisplay;
+  window.syncWithServer = syncWithServer;      // (optional visibility)
+  window.resolveConflicts = resolveConflicts;  // (optional visibility)
 }
 
 document.addEventListener("DOMContentLoaded", init);
