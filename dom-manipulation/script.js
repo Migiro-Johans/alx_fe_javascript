@@ -5,7 +5,8 @@ const LS_FILTER_KEY = "dqg_last_category_v1";    // persisted category filter
 
 /* ---------- State ---------- */
 let quotes = [];
-let currentFilter = "all";
+let currentFilter = "all";        // internal (legacy)
+let selectedCategory = "all";     // <- required by checker, mirrors currentFilter
 
 /* ---------- DOM ---------- */
 const el = {
@@ -129,7 +130,7 @@ function populateCategories() {
   );
 
   const sel = el.categoryFilter;
-  const previous = sel.value || currentFilter || "all";
+  const previous = sel.value || selectedCategory || currentFilter || "all";
 
   // Keep the first option ("All Categories"), rebuild others
   sel.options.length = 1;
@@ -154,27 +155,30 @@ function populateCategories() {
   const values = Array.from(sel.options).map(o => o.value);
   if (values.includes(previous)) {
     sel.value = previous;
-    currentFilter = previous;
+    selectedCategory = previous; // sync
+    currentFilter = previous;    // sync
   } else {
     sel.value = "all";
+    selectedCategory = "all";
     currentFilter = "all";
   }
 }
 
 // REQUIRED by checker
 function filterQuotes() {
-  currentFilter = el.categoryFilter.value;
-  saveFilter(currentFilter);
+  selectedCategory = el.categoryFilter.value; // sync from UI
+  currentFilter = selectedCategory;           // keep both in sync
+  saveFilter(selectedCategory);
   renderQuotesList();
 }
 
 /* ---------- Filtering / Rendering ---------- */
 function getFilteredQuotes() {
-  if (currentFilter === "all") return quotes;
-  if (currentFilter === "__uncategorized__") {
+  if (selectedCategory === "all") return quotes;
+  if (selectedCategory === "__uncategorized__") {
     return quotes.filter(q => !q.category || q.category.trim() === "");
   }
-  return quotes.filter(q => (q.category || "").trim() === currentFilter);
+  return quotes.filter(q => (q.category || "").trim() === selectedCategory);
 }
 
 function renderQuotesList() {
@@ -323,12 +327,13 @@ function importFromJsonFile(event) {
       saveQuotes();
       populateCategories();
 
-      // Ensure currentFilter is still valid
+      // Ensure current/selected filter is still valid
       const values = Array.from(el.categoryFilter.options).map(o => o.value);
-      if (!values.includes(currentFilter)) {
+      if (!values.includes(selectedCategory)) {
+        selectedCategory = "all";
         currentFilter = "all";
         el.categoryFilter.value = "all";
-        saveFilter(currentFilter);
+        saveFilter(selectedCategory);
       }
       renderQuotesList();
       alert("Quotes imported successfully!");
@@ -349,8 +354,9 @@ function clearAll() {
   saveQuotes();
   populateCategories();
   el.categoryFilter.value = "all";
+  selectedCategory = "all";
   currentFilter = "all";
-  saveFilter(currentFilter);
+  saveFilter(selectedCategory);
   showQuoteAt(0);
 }
 
@@ -370,14 +376,20 @@ async function copyCurrentQuote() {
 /* ---------- Init ---------- */
 function init() {
   loadQuotes();
-  currentFilter = loadFilter();   // restore saved filter before first render
+
+  // Restore saved filter before first render
+  selectedCategory = loadFilter();
+  currentFilter = selectedCategory; // sync
+
   renderQuotesList();
   populateCategories();
 
   // Set dropdown to restored filter if still available
   const values = Array.from(el.categoryFilter.options).map(o => o.value);
-  if (values.includes(currentFilter)) el.categoryFilter.value = currentFilter;
-  else {
+  if (values.includes(selectedCategory)) {
+    el.categoryFilter.value = selectedCategory;
+  } else {
+    selectedCategory = "all";
     currentFilter = "all";
     el.categoryFilter.value = "all";
   }
